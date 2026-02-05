@@ -1,0 +1,30 @@
+# .gitignore para Keycloak HA
+
+# Docker volumes
+postgres_data/
+
+# Logs
+*.log
+
+# Environment files con credenciales
+.env
+.env.local
+.env.*.local
+
+# Backups de base de datos
+*.sql
+*.dump
+
+# Archivos temporales
+*.tmp
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
