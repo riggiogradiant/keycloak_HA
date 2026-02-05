@@ -1,48 +1,45 @@
-# Keycloak High Availability con Infinispan
+# Keycloak HA con Infinispan
 
-## 🎯 Objetivo del Proyecto
+Despliegue de 2 instancias de Keycloak con clustering Infinispan en **modo producción**.
 
-Desplegar 2 instancias de Keycloak en **modo producción** con SSL, clustering Infinispan, load balancer Nginx y PostgreSQL compartida para alta disponibilidad real.
+## 🎯 Arquitectura
 
-## ✅ Características
+- **2 Keycloaks** con Infinispan clustering (JGroups TCPPING)
+- **1 PostgreSQL** compartida (claves de firma compartidas)
+- **Modo producción** con SSL
+- **Sesiones replicadas** entre nodos
 
-- ✅ **2 nodos Keycloak** en cluster
-- ✅ **Modo producción** (`start --optimized`)
-- ✅ **SSL/HTTPS** con certificados auto-generados
-- ✅ **Infinispan distribuido** - Sesiones replicadas
-- ✅ **JGroups TCPPING** - Clustering entre nodos
-- ✅ **Nginx Load Balancer** - Sticky sessions
-- ✅ **PostgreSQL compartida** - Datos sincronizados
-- ✅ **Failover automático** - Zero downtime
-
-## 🚀 Despliegue Rápido
+## 🚀 Despliegue
 
 ```bash
-./deploy-prod.sh
+./deploy.sh
 ```
 
 ## 🌐 Acceso
 
-- 🔀 **Load Balancer**: https://localhost
-- 🔵 **Nodo 1**: https://localhost:8443
-- 🟢 **Nodo 2**: https://localhost:8444
+- **Keycloak 1**: https://localhost:8443
+- **Keycloak 2**: https://localhost:8444
+- **Credenciales**: admin / admin
 
-**Credenciales**: admin / (ver `.env.prod`)
+⚠️ Certificados auto-firmados: aceptar en navegador
 
 ## 🧪 Pruebas
 
 ```bash
-# Test completo
-./test-ha-realistic.sh
+./test.sh
+```
 
-# Ver estado
-./status.sh
+Verifica que los tokens sean válidos entre nodos.
 
-# Detener
+## 🛑 Detener
+
+```bash
 ./stop.sh
 ```
 
-## 📚 Documentación Completa
+## ✅ Funcionalidades
 
-- **[PRODUCCION.md](PRODUCCION.md)** - Guía completa de producción ⭐
-- **[LIMITACIONES.md](LIMITACIONES.md)** - Diferencias desarrollo vs producción
+- ✅ **Tokens compartidos** entre nodos
+- ✅ **Sesiones replicadas** con Infinispan
+- ✅ **Failover** automático
+- ✅ Base de datos compartida (usuarios y claves replicadas)
