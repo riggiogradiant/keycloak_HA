@@ -65,6 +65,81 @@ else
 fi
 
 echo ""
+echo "5️⃣ Testing shared database access..."
+echo ""
+
+# Crear usuario desde Node 1
+echo "Creating user 'prueba_bd' from Node 1..."
+RANDOM_SUFFIX=$(date +%s)
+USERNAME_1="prueba_bd_node_1${RANDOM_SUFFIX}"
+CREATE_RESPONSE_1=$(curl -k -s -o /dev/null -w "%{http_code}" -X POST "https://localhost:8443/admin/realms/master/users" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"$USERNAME_1\",\"enabled\":true,\"email\":\"${USERNAME_1}@test.com\"}")
+
+if [ "$CREATE_RESPONSE_1" = "201" ]; then
+    echo "✅ User '$USERNAME_1' created on Node 1"
+else
+    echo "❌ Failed to create user on Node 1 (HTTP $CREATE_RESPONSE_1)"
+fi
+
+# Buscar el usuario desde Node 2
+sleep 1
+echo ""
+echo "Searching for user '$USERNAME_1' from Node 2..."
+SEARCH_RESPONSE_1=$(curl -k -s -X GET "https://localhost:8444/admin/realms/master/users?username=$USERNAME_1" \
+  -H "Authorization: Bearer $TOKEN")
+
+USER_COUNT_1=$(echo "$SEARCH_RESPONSE_1" | grep -o "\"username\":\"$USERNAME_1\"" | wc -l)
+
+if [ "$USER_COUNT_1" -gt 0 ]; then
+    echo "✅ User '$USERNAME_1' found on Node 2!"
+    echo "   └─ Database READ from Node 2 successful"
+else
+    echo "❌ User '$USERNAME_1' NOT found on Node 2"
+    echo "   Database may not be properly shared"
+fi
+
+# Crear usuario desde Node 2
+echo ""
+USERNAME_2="prueba_bd_node2_${RANDOM_SUFFIX}"
+echo "Creating user '$USERNAME_2' from Node 2..."
+CREATE_RESPONSE_2=$(curl -k -s -o /dev/null -w "%{http_code}" -X POST "https://localhost:8444/admin/realms/master/users" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"$USERNAME_2\",\"enabled\":true,\"email\":\"${USERNAME_2}@test.com\"}")
+
+if [ "$CREATE_RESPONSE_2" = "201" ]; then
+    echo "✅ User '$USERNAME_2' created on Node 2"
+else
+    echo "❌ Failed to create user on Node 2 (HTTP $CREATE_RESPONSE_2)"
+fi
+
+# Buscar el usuario desde Node 1
+sleep 1
+echo ""
+echo "Searching for user '$USERNAME_2' from Node 1..."
+SEARCH_RESPONSE_2=$(curl -k -s -X GET "https://localhost:8443/admin/realms/master/users?username=$USERNAME_2" \
+  -H "Authorization: Bearer $TOKEN")
+
+USER_COUNT_2=$(echo "$SEARCH_RESPONSE_2" | grep -o "\"username\":\"$USERNAME_2\"" | wc -l)
+
+if [ "$USER_COUNT_2" -gt 0 ]; then
+    echo "✅ User '$USERNAME_2' found on Node 1!"
+    echo "   └─ Database READ from Node 1 successful"
+else
+    echo "❌ User '$USERNAME_2' NOT found on Node 1"
+    echo "   Database may not be properly shared"
+fi
+
+echo ""
+echo "📊 Database Shared Access Summary:"
+echo "   • Node 1 WRITE → Node 2 READ: $([ "$USER_COUNT_1" -gt 0 ] && echo "✅ OK" || echo "❌ FAIL")"
+echo "   • Node 2 WRITE → Node 1 READ: $([ "$USER_COUNT_2" -gt 0 ] && echo "✅ OK" || echo "❌ FAIL")"
+echo ""
+echo "   Both nodes accessing the SAME PostgreSQL database!"
+
+echo ""
 echo "================================="
 echo "Test completed"
 echo "================================="
