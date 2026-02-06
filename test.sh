@@ -140,6 +140,76 @@ echo ""
 echo "   Both nodes accessing the SAME PostgreSQL database!"
 
 echo ""
+echo "6️⃣ Testing Failover: Node 1 down, token still valid on Node 2..."
+echo ""
+
+# Obtener un nuevo token de Node 1
+echo "Getting fresh token from Node 1..."
+TOKEN_FAILOVER=$(curl -k -s -X POST "https://localhost:8443/realms/master/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin" \
+  -d "password=admin" \
+  -d "grant_type=password" \
+  -d "client_id=admin-cli" | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+
+if [ -z "$TOKEN_FAILOVER" ]; then
+    echo "❌ Failed to get token from Node 1"
+    exit 1
+fi
+
+echo "✅ Token obtained from Node 1: ${TOKEN_FAILOVER:0:20}..."
+echo ""
+
+# Parar Keycloak-1
+echo "🛑 Stopping Keycloak-1..."
+docker stop keycloak-1 > /dev/null 2>&1
+sleep 2
+echo "✅ Keycloak-1 stopped"
+echo ""
+
+# Verificar que Node 1 está caído
+HTTP_CODE_DOWN=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:8443 2>/dev/null)
+if [ "$HTTP_CODE_DOWN" = "000" ]; then
+    echo "✅ Confirmed: Keycloak-1 is DOWN (cannot connect)"
+else
+    echo "⚠️  Warning: Keycloak-1 might still be running (HTTP $HTTP_CODE_DOWN)"
+fi
+echo ""
+
+# Intentar usar el token en Node 2
+echo "Trying to use Node 1's token on Node 2 (while Node 1 is DOWN)..."
+FAILOVER_RESPONSE=$(curl -k -s -o /dev/null -w "%{http_code}" -X GET "https://localhost:8444/admin/realms/master/users?max=1" \
+  -H "Authorization: Bearer $TOKEN_FAILOVER")
+
+echo ""
+if [ "$FAILOVER_RESPONSE" = "200" ]; then
+    echo "🎉 SUCCESS! Token from Node 1 is VALID on Node 2!"
+    echo "   └─ Infinispan replicated the session successfully"
+    echo "   └─ FAILOVER is working correctly"
+    echo "   └─ Users won't lose their session if a node goes down"
+else
+    echo "❌ FAIL: Token from Node 1 NOT valid on Node 2 (HTTP $FAILOVER_RESPONSE)"
+    echo "   └─ Session replication may not be working"
+fi
+
+# Reiniciar Keycloak-1
+echo ""
+echo "🔄 Restarting Keycloak-1..."
+docker start keycloak-1 > /dev/null 2>&1
+echo "⏳ Waiting for Keycloak-1 to come back online..."
+sleep 15
+
+for i in {1..20}; do
+    HTTP_CODE_UP=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:8443 2>/dev/null)
+    if [ "$HTTP_CODE_UP" = "200" ]; then
+        echo "✅ Keycloak-1 is back online"
+        break
+    fi
+    echo -n "."
+    sleep 3
+done
+
+echo ""
 echo "================================="
 echo "Test completed"
 echo "================================="
