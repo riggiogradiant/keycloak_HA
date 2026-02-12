@@ -1,199 +1,186 @@
 # =============================================================================
-# NODO 2 - Keycloak HA con PostgreSQL Streaming Replication
-#
-# Componentes:
-#   - PostgreSQL REPLICA (R/O) - Replica desde PRIMARY de NODO 1
-#   - HAProxy (Proxy a PRIMARY remoto + REPLICA local)
-#   - pgpool-II (Query routing: escrituras → PRIMARY remoto, lecturas → REPLICA local)
-#   - Keycloak-2 (Aplicación)
-#
-# Despliegue: NODO 1 debe estar corriendo primero
-# Configuración: Requiere IP del NODO 1 para replicación
+# NODO 2 - Keycloak HA con Infinispan
+# Despliegue local/producción con PostgreSQL + Keycloak
 # =============================================================================
 
 volumes:
-  postgres_replica_data:
+  postgres_data:
+    driver: local
+  etcd_data:
+    driver: local
 
 networks:
-  keycloak-ha-net:
-    driver: bridge
+  keycloak_net:
+    external: true
 
 services:
-  # ============================================
-  # POSTGRESQL REPLICA (R/O)
-  # Replica desde PRIMARY de NODO 1
-  # ============================================
-  postgres-replica:
-    image: postgres:15
-    container_name: postgres-replica
-    hostname: postgres-replica
-    environment:
-      POSTGRES_PASSWORD: postgres_admin
-      PRIMARY_HOST: <NODO1_IP>  # ⚠️ CONFIGURAR: IP del NODO 1
-      PRIMARY_PORT: 5432
-      PGPASSWORD: postgres_admin
-    volumes:
-      - postgres_replica_data:/var/lib/postgresql/data
-      - ./postgres/setup-replica.sh:/docker-entrypoint-initdb.d/setup-replica.sh:ro
-      - ./postgres/replica-entrypoint.sh:/usr/local/bin/replica-entrypoint.sh:ro
-      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-      - ./postgres/postgresql-replica.conf:/etc/postgresql/postgresql.conf:ro
-    entrypoint: ["/bin/bash", "/usr/local/bin/replica-entrypoint.sh"]
-    ports:
-      - "5432:5432"  # Puerto estándar local
-    networks:
-      - keycloak-ha-net
+  # =============================================================================
+  # etcd - Distributed Configuration Store for Patroni
+  # =============================================================================
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.10
+    container_name: etcd-nodo2
+    hostname: etcd-nodo2
     restart: unless-stopped
+    
+    command:
+      - etcd
+      - --name=etcd-nodo2
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-nodo2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-nodo2:2380
+      - --initial-cluster=etcd-nodo1=http://etcd-nodo1:2380,etcd-nodo2=http://etcd-nodo2:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=keycloak-etcd-cluster
+    
+    volumes:
+      - etcd_data:/etcd-data
+    
+    networks:
+      - keycloak_net
+    
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 90s
+      start_period: 10s
 
-  # ============================================
-  # HAPROXY - Proxy a PRIMARY remoto + REPLICA local
-  # ============================================
-  haproxy:
-    image: haproxy:2.9-alpine
-    container_name: haproxy
-    hostname: haproxy
-    volumes:
-      - ./haproxy/haproxy-nodo2.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    ports:
-      - "5000:5000"  # PRIMARY remoto (proxy)
-      - "5001:5001"  # REPLICA local
-      - "7000:7000"  # Stats
-    networks:
-      - keycloak-ha-net
-    extra_hosts:
-      - "nodo1-primary:<NODO1_IP>"  # ⚠️ CONFIGURAR: IP del NODO 1
-    depends_on:
-      postgres-replica:
-        condition: service_healthy
+  # =============================================================================
+  # PostgreSQL para Keycloak NODO 2 (gestionado por Patroni)
+  # =============================================================================
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.patroni
+    image: keycloak_ha-patroni:latest
+    container_name: postgres-nodo2
+    hostname: postgres-nodo2
     restart: unless-stopped
+    
+    depends_on:
+      etcd:
+        condition: service_healthy
+    
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres_admin}
+      PGDATA: /home/postgres/pgdata/data
+    
+    volumes:
+      - postgres_data:/home/postgres/pgdata
+      - ./patroni/patroni-nodo2.yml:/etc/patroni/patroni.yml:ro
+    
+    networks:
+      - keycloak_net
+    
     healthcheck:
-      test: ["CMD-SHELL", "haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8008/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
-
-  # ============================================
-  # PGPOOL-II - Query Routing con PRIMARY remoto
-  # Backend 0: PRIMARY remoto (NODO 1) - Escrituras
-  # Backend 1: REPLICA local (NODO 2) - Lecturas
-  # ============================================
-  pgpool:
-    image: pgpool/pgpool:latest
-    container_name: pgpool
-    hostname: pgpool
-    environment:
-      - POSTGRES_USERNAME=postgres
-      - POSTGRES_PASSWORD=postgres_admin
-      # Backend 0: PRIMARY remoto (NODO 1) - Solo escrituras
-      - PGPOOL_PARAMS_BACKEND_HOSTNAME0=<NODO1_IP>
-      - PGPOOL_PARAMS_BACKEND_PORT0=5432
-      - PGPOOL_PARAMS_BACKEND_WEIGHT0=0
-      - PGPOOL_PARAMS_BACKEND_FLAG0=ALWAYS_PRIMARY
-      # Backend 1: REPLICA local - Lecturas
-      - PGPOOL_PARAMS_BACKEND_HOSTNAME1=postgres-replica
-      - PGPOOL_PARAMS_BACKEND_PORT1=5432
-      - PGPOOL_PARAMS_BACKEND_WEIGHT1=1
-      - PGPOOL_PARAMS_BACKEND_FLAG1=DISALLOW_TO_FAILOVER
-      - PGPOOL_PARAMS_NUM_INIT_CHILDREN=32
-      - PGPOOL_PARAMS_MAX_POOL=4
-      - PGPOOL_PARAMS_LOAD_BALANCE_MODE=on
-      - PGPOOL_PARAMS_MASTER_SLAVE_MODE=on
-      - PGPOOL_PARAMS_MASTER_SLAVE_SUB_MODE=stream
-      - PGPOOL_PARAMS_SR_CHECK_USER=postgres
-      - PGPOOL_PARAMS_SR_CHECK_PASSWORD=postgres_admin
-      - PGPOOL_PARAMS_HEALTH_CHECK_USER=postgres
-      - PGPOOL_PARAMS_HEALTH_CHECK_PASSWORD=postgres_admin
-      - PGPOOL_PARAMS_HEALTH_CHECK_PERIOD=10
-      - PGPOOL_PARAMS_HEALTH_CHECK_TIMEOUT=20
-      - PGPOOL_PARAMS_DISABLE_LOAD_BALANCE_ON_WRITE=transaction
-    volumes:
-      - ./pgpool/pgpool-nodo2.conf:/config/pgpool.conf:ro
-      - ./pgpool/pool_hba.conf:/config/pool_hba.conf:ro
-      - ./pgpool/pool_passwd:/config/pool_passwd:ro
-    ports:
-      - "9999:9999"
-      - "9898:9898"
-    networks:
-      - keycloak-ha-net
-    extra_hosts:
-      - "nodo1-primary:<NODO1_IP>"  # ⚠️ CONFIGURAR: IP del NODO 1
-    depends_on:
-      haproxy:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "psql -h localhost -p 9999 -U postgres -d postgres -c 'SELECT 1' > /dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 10s
       retries: 5
       start_period: 30s
 
-  # ============================================
-  # KEYCLOAK 2 (NODO 2)
-  # Conecta a pgpool (proxy a PRIMARY remoto)
-  # Cluster con Keycloak-1 (NODO 1) via JGroups TCP
-  # ============================================
-  keycloak-2:
-    build: .
-    container_name: keycloak-2
-    hostname: keycloak-2
+  # =============================================================================
+  # HAProxy - Automatic routing to PostgreSQL PRIMARY
+  # =============================================================================
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: haproxy-nodo2
+    hostname: haproxy-nodo2
+    restart: unless-stopped
+    
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    
+    networks:
+      - keycloak_net
+    
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # =============================================================================
+  # Keycloak NODO 2 con Infinispan Clustering
+  # =============================================================================
+  keycloak:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: keycloak-nodo2
+    hostname: keycloak-nodo2
+    restart: unless-stopped
+    
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Admin credentials
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       
-      # Database configuration (pgpool proxy)
+      # Database configuration
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://pgpool:9999/keycloak
+      KC_DB_URL: jdbc:postgresql://haproxy-nodo2:5432/keycloak
       KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak_secret}
       KC_DB_SCHEMA: public
-      KC_TRANSACTION_XA_ENABLED: false
       
       # Hostname configuration
-      KC_HOSTNAME_STRICT: false
-      KC_HTTP_ENABLED: false
-      KC_HOSTNAME_PORT: 8443
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "false"
       
-      # SSL/TLS configuration
-      KC_HTTPS_ENABLED: true
-      KC_HTTPS_PORT: 8443
-      KC_HTTPS_KEY_STORE_FILE: /opt/keycloak/conf/keycloak.p12
-      KC_HTTPS_KEY_STORE_PASSWORD: changeit
-      KC_HTTPS_KEY_STORE_TYPE: PKCS12
+      # HTTPS/TLS configuration
+      KC_HTTPS_ENABLED: "true"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/tls.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/tls.key
       
-      # Clustering with Infinispan (JGroups TCP)
+      # High Availability - Infinispan Clustering
       KC_CACHE: ispn
       KC_CACHE_STACK: tcp
+      
+      # JGroups discovery (TCPPING para producción sin multicast)
       JGROUPS_DISCOVERY_PROTOCOL: TCPPING
-      JGROUPS_DISCOVERY_PROPERTIES: initial_hosts="<NODO1_IP>\\:7800\\,keycloak-2[7800]",port_range=0
-      KC_CACHE_CONFIG_FILE: cache-ispn-jdbc-ping.xml
+      JGROUPS_DISCOVERY_PROPERTIES: initial_hosts="keycloak-nodo1[7800]\\,keycloak-nodo2[7800]",port_range=0
       
       # Logging
-      KC_LOG_LEVEL: INFO
+      KC_LOG_LEVEL: ${KC_LOG_LEVEL:-info}
       KC_LOG_CONSOLE_OUTPUT: default
       
       # Health and metrics
-      KC_HEALTH_ENABLED: true
-      KC_METRICS_ENABLED: true
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      
+      # Performance tuning
+      JAVA_OPTS_APPEND: >-
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=200
+        -XX:+DisableExplicitGC
+        -Djava.net.preferIPv4Stack=true
+        -Djgroups.tcp.port=7800
+    
     ports:
-      - "8443:8443"    # HTTPS
-      - "7800:7800"    # JGroups clustering
+      - "${KC_PORT:-8444}:8443"    # HTTPS Keycloak (puerto 8444 para pruebas locales)
+      - "${JGROUPS_PORT:-7801}:7800"  # JGroups clustering (puerto 7801 para evitar conflicto)
+    
     volumes:
-      - ./certs/keycloak.p12:/opt/keycloak/conf/keycloak.p12:ro
+      - ./certs/tls.crt:/opt/keycloak/conf/tls.crt:ro
+      - ./certs/tls.key:/opt/keycloak/conf/tls.key:ro
+    
     networks:
-      - keycloak-ha-net
-    extra_hosts:
-      - "nodo1-keycloak:<NODO1_IP>"  # ⚠️ CONFIGURAR: IP del NODO 1
-    depends_on:
-      pgpool:
-        condition: service_healthy
-    restart: unless-stopped
+      - keycloak_net
+    
     healthcheck:
       test: ["CMD-SHELL", "curl -f -k https://localhost:8443/health/ready || exit 1"]
       interval: 30s

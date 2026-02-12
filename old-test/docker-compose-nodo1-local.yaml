@@ -1,0 +1,115 @@
+# =============================================================================
+# NODO 1 - Keycloak HA - Paso 1: Clustering Infinispan
+#
+# Componentes (simplificado):
+#   - PostgreSQL PRIMARY (sin configuración de replicación)
+#   - Keycloak-1 con clustering Infinispan/JGroups
+#
+# Próximos pasos:
+#   - Añadir PostgreSQL Streaming Replication
+#   - Añadir pgpool-II y HAProxy
+# =============================================================================
+
+volumes:
+  postgres_primary_data:
+
+networks:
+  keycloak-ha-net:
+    driver: bridge
+
+services:
+  # ============================================
+  # POSTGRESQL PRIMARY (Configuración Simple)
+  # ============================================
+  postgres-primary:
+    image: postgres:15
+    container_name: postgres-primary
+    hostname: postgres-primary
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_admin
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_primary_data:/var/lib/postgresql/data
+    command: [
+        "postgres",
+        "-c", "max_connections=200",
+        "-c", "shared_buffers=256MB",
+        "-c", "listen_addresses=*"
+      ]
+    ports:
+      - "5432:5432"  # Expuesto para que NODO 2 se conecte
+    networks:
+      - keycloak-ha-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ============================================
+  # KEYCLOAK 1 (NODO 1)
+  # Configurado para clustering con Infinispan/JGroups
+  # ============================================
+  keycloak-1:
+    build: .
+    container_name: keycloak-1
+    hostname: keycloak-1
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      
+      # Database configuration (PostgreSQL directo)
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres-primary:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_DB_SCHEMA: public
+      KC_TRANSACTION_XA_ENABLED: false
+      
+      # Hostname configuration
+      KC_HOSTNAME_STRICT: false
+      KC_HTTP_ENABLED: false
+      KC_HOSTNAME_PORT: 8443
+      
+      # SSL/TLS configuration
+      KC_HTTPS_ENABLED: true
+      KC_HTTPS_PORT: 8443
+      KC_HTTPS_KEY_STORE_FILE: /opt/keycloak/conf/keycloak.p12
+      KC_HTTPS_KEY_STORE_PASSWORD: changeit
+      KC_HTTPS_KEY_STORE_TYPE: PKCS12
+      
+      # ⭐ Clustering with Infinispan (JGroups TCP)
+      KC_CACHE: ispn
+      KC_CACHE_STACK: tcp
+      JGROUPS_DISCOVERY_PROTOCOL: TCPPING
+      # ⚠️ CONFIGURAR: Reemplazar 172.21.63.22 con IP real del NODO 2
+      JGROUPS_DISCOVERY_PROPERTIES: initial_hosts="keycloak-1[7800]\\,keycloak-2[7800]",port_range=0
+      KC_CACHE_CONFIG_FILE: cache-ispn-jdbc-ping.xml
+      
+      # Logging
+      KC_LOG_LEVEL: INFO
+      KC_LOG_CONSOLE_OUTPUT: default
+      
+      # Health and metrics
+      KC_HEALTH_ENABLED: true
+      KC_METRICS_ENABLED: true
+    ports:
+      - "8443:8443"    # HTTPS Keycloak
+      - "7800:7800"    # JGroups clustering
+    volumes:
+      - ./certs/keycloak.p12:/opt/keycloak/conf/keycloak.p12:ro
+    networks:
+      - keycloak-ha-net
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -f https://localhost:8443/health/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s

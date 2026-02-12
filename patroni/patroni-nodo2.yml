@@ -1,0 +1,92 @@
+# =============================================================================
+# Patroni Configuration - NODO 2 (Initial REPLICA)
+# =============================================================================
+scope: keycloak-postgres-cluster
+name: postgres-nodo2
+namespace: /db/
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: postgres-nodo2:8008
+
+etcd3:
+  hosts: etcd-nodo1:2379,etcd-nodo2:2379
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        # Replication settings
+        wal_level: replica
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 512MB
+        hot_standby: on
+        
+        # Performance settings (from current deployment)
+        max_connections: 200
+        shared_buffers: 256MB
+        effective_cache_size: 1GB
+        maintenance_work_mem: 64MB
+        checkpoint_completion_target: 0.9
+        wal_buffers: 16MB
+        default_statistics_target: 100
+        random_page_cost: 1.1
+        effective_io_concurrency: 200
+        work_mem: 2621kB
+        min_wal_size: 1GB
+        max_wal_size: 4GB
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+    - locale: en_US.UTF-8
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+    - local all all trust
+
+  users:
+    admin:
+      password: admin_secret
+      options:
+        - createrole
+        - createdb
+
+  post_bootstrap: /etc/patroni/post_init.sh
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: postgres-nodo2:5432
+  data_dir: /home/postgres/pgdata/data
+  bin_dir: /usr/local/bin
+  authentication:
+    replication:
+      username: replicator
+      password: replicator_secret
+    superuser:
+      username: postgres
+      password: postgres_admin
+    rewind:
+      username: replicator
+      password: replicator_secret
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  create_replica_methods:
+    - basebackup
+  basebackup:
+    max-rate: 100M
+    checkpoint: fast
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

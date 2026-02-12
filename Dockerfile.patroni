@@ -1,0 +1,41 @@
+# =============================================================================
+# Dockerfile - PostgreSQL 15 con Patroni
+# =============================================================================
+FROM postgres:15-alpine
+
+# Instalar dependencias
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    py3-psycopg2 \
+    py3-yaml \
+    py3-requests \
+    py3-click \
+    curl \
+    bash
+
+# Instalar Patroni y dependencias CLI
+RUN pip3 install --break-system-packages \
+    patroni[etcd3]==3.2.2 \
+    cdiff
+
+# Crear directorios y copiar scripts
+RUN mkdir -p /home/postgres/pgdata && \
+    mkdir -p /etc/patroni && \
+    chown -R postgres:postgres /home/postgres && \
+    chown -R postgres:postgres /etc/patroni
+
+COPY patroni/post_init.sh /etc/patroni/post_init.sh
+RUN chmod +x /etc/patroni/post_init.sh && chown postgres:postgres /etc/patroni/post_init.sh
+
+# Configurar PGDATA para postgres
+ENV PGDATA=/home/postgres/pgdata/data
+
+# Usuario por defecto
+USER postgres
+
+# Puerto de Patroni API
+EXPOSE 8008
+
+# Comando por defecto
+CMD ["patroni", "/etc/patroni/patroni.yml"]

@@ -1,29 +1,63 @@
 #!/bin/bash
+# =============================================================================
+# Script de Generación de Certificados SSL/TLS
+# Para uso en desarrollo/testing de Keycloak
+# =============================================================================
 
-echo "🔐 Generating SSL certificates..."
+set -e
 
-mkdir -p certs
+CERT_DIR="certs"
+DOMAIN="${CERT_DOMAIN:-localhost}"
+DAYS="${CERT_DAYS:-3650}"
 
-# Generar certificado auto-firmado
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout certs/keycloak.key \
-  -out certs/keycloak.crt \
-  -days 365 \
-  -subj "/CN=localhost/O=Keycloak/C=ES" \
-  -addext "subjectAltName=DNS:localhost,DNS:keycloak-1,DNS:keycloak-2,IP:127.0.0.1" \
-  2>/dev/null
+echo "=========================================="
+echo "  Generador de Certificados SSL/TLS"
+echo "=========================================="
+echo ""
+echo "  Dominio: $DOMAIN"
+echo "  Validez: $DAYS días"
+echo ""
 
-# Convertir a PKCS12
-openssl pkcs12 -export \
-  -in certs/keycloak.crt \
-  -inkey certs/keycloak.key \
-  -out certs/keycloak.p12 \
-  -name keycloak \
-  -passout pass:changeit
+# Crear directorio de certificados
+mkdir -p "$CERT_DIR"
 
-# Dar permisos de lectura para que Docker pueda leerlo
-chmod 644 certs/keycloak.p12
-chmod 644 certs/keycloak.crt
-chmod 600 certs/keycloak.key
+# Generar clave privada
+echo "[1/3] Generando clave privada..."
+openssl genrsa -out "$CERT_DIR/tls.key" 2048
+echo "  ✅ Clave privada creada: $CERT_DIR/tls.key"
 
-echo "✅ Certificates generated in certs/"
+# Generar certificado autofirmado
+echo ""
+echo "[2/3] Generando certificado autofirmado..."
+openssl req -new -x509 \
+  -key "$CERT_DIR/tls.key" \
+  -out "$CERT_DIR/tls.crt" \
+  -days "$DAYS" \
+  -subj "/C=ES/ST=Spain/L=Madrid/O=Development/OU=IT/CN=$DOMAIN" \
+  -addext "subjectAltName=DNS:$DOMAIN,DNS:*.${DOMAIN},DNS:localhost,DNS:keycloak-nodo1,DNS:keycloak-nodo2,IP:127.0.0.1"
+
+echo "  ✅ Certificado creado: $CERT_DIR/tls.crt"
+
+# Mostrar información del certificado
+echo ""
+echo "[3/3] Información del certificado:"
+echo "----------------------------------------"
+openssl x509 -in "$CERT_DIR/tls.crt" -noout -subject -dates -ext subjectAltName
+
+# Establecer permisos
+chmod 600 "$CERT_DIR/tls.key"
+chmod 644 "$CERT_DIR/tls.crt"
+
+echo ""
+echo "=========================================="
+echo "  ✅ Certificados generados exitosamente"
+echo "=========================================="
+echo ""
+echo "  Archivos creados:"
+echo "    - $CERT_DIR/tls.key (clave privada)"
+echo "    - $CERT_DIR/tls.crt (certificado)"
+echo ""
+echo "  ⚠️  ADVERTENCIA: Estos son certificados"
+echo "      autofirmados solo para desarrollo."
+echo "      NO usar en producción."
+echo ""
