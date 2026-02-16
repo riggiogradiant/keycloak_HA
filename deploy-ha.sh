@@ -71,8 +71,8 @@ echo "  ✅ Imagen keycloak_ha-keycloak construida"
 # Paso 3: Detener despliegue anterior (si existe)
 # =============================================================================
 step "Paso 3/7: Limpiando despliegue anterior"
-docker compose -p nodo1 -f docker-compose-nodo1.yaml down -v 2>/dev/null || true
-docker compose -p nodo2 -f docker-compose-nodo2.yaml down -v 2>/dev/null || true
+docker compose -p nodo1 -f docker-compose-nodo1.yaml down --remove-orphans -v 2>/dev/null || true
+docker compose -p nodo2 -f docker-compose-nodo2.yaml down --remove-orphans -v 2>/dev/null || true
 echo "  ✅ Limpieza completada"
 
 # =============================================================================
