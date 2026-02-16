@@ -513,22 +513,6 @@ docker exec etcd-nodo1 etcdctl member list
 docker exec postgres-nodo1 patronictl -c /etc/patroni/patroni.yml list
 ```
 
-## 🔐 Seguridad en Producción
-
-- [ ] Cambiar contraseñas por defecto en `.env`
-- [ ] Usar certificados válidos (Let's Encrypt)
-- [ ] Configurar firewall (solo puertos necesarios)
-- [ ] Habilitar PostgreSQL SSL/TLS
-- [ ] Configurar backup automático de bases de datos
-- [ ] Implementar monitoreo (Prometheus + Grafana)
-- [ ] Configurar log aggregation (ELK Stack)
-
-## 📚 Documentación Adicional
-
-- [Keycloak Server Administration](https://www.keycloak.org/docs/latest/server_admin/)
-- [Keycloak on Kubernetes](https://www.keycloak.org/operator/basic-deployment)
-- [Infinispan Documentation](https://infinispan.org/documentation/)
-- [JGroups Protocol Stack](http://jgroups.org/manual4/index.html)
 
 ## 🆘 Troubleshooting
 
@@ -719,26 +703,3 @@ KC_PORT_NODO2=9444  # Para nodo 2
 - **Patroni REST API**: Estado del cluster en tiempo real
 - **Docker healthchecks**: Estado de cada componente
 - **Test suite**: Scripts automatizados de verificación
-
-## 🎯 Casos de Uso
-
-Este setup es ideal para:
-
-- ✅ **Entornos de producción** que requieren alta disponibilidad
-- ✅ **Aplicaciones críticas** con requisitos de uptime > 99.9%
-- ✅ **Arquitecturas multi-datacenter** (con ajustes de red)
-- ✅ **Desarrollo y staging** con configuración idéntica a producción
-- ✅ **Testing de failover** y recuperación ante desastres
-
-## 🚀 Próximas Mejoras
-
-- [ ] Backup automático de PostgreSQL a S3/MinIO
-- [ ] Monitoreo con Prometheus + Grafana
-- [ ] Log aggregation con ELK Stack
-- [ ] Usar HAProxy para read scaling (lecturas a REPLICAs)
-- [ ] Kubernetes Helm Charts para despliegue en K8s
-- [ ] Multi-region deployment con synchronous_commit configurado
-
-## 📄 Licencia
-
-Este proyecto es de código abierto para fines educativos y de desarrollo.
