@@ -1,0 +1,164 @@
+---
+# =============================================================================
+# Playbook: 01-prepare-hosts.yml
+# Purpose: Prepare hosts for Keycloak HA deployment
+# Phase: 2 - Host Preparation
+#
+# This playbook prepares both hosts before any service deployment:
+# 1. Creates deployment directories
+# 2. Configures firewall rules for inter-node communication
+# 3. Copies Dockerfiles to hosts
+# 4. Builds Docker images (Keycloak and Patroni)
+# =============================================================================
+
+- name: Phase 2 - Prepare Hosts for Keycloak HA Deployment
+  hosts: all
+  gather_facts: yes
+  become: no  # No sudo needed - working in user's home directory
+
+  tasks:
+    # ========================================
+    # Task Group 1: Directory Structure
+    # ========================================
+    - name: "📁 Create deployment base directory"
+      ansible.builtin.file:
+        path: "{{ deployment_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📁 Create subdirectories"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      loop:
+        - "{{ deployment_dir }}/certs"
+        - "{{ deployment_dir }}/patroni"
+        - "{{ deployment_dir }}/haproxy"
+
+
+    # ========================================
+    # Task Group 3: Copy Dockerfiles
+    # ========================================
+    - name: "📦 Copy Keycloak Dockerfile"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../Dockerfile"
+        dest: "{{ deployment_dir }}/Dockerfile"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📦 Copy Patroni Dockerfile"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../Dockerfile.patroni"
+        dest: "{{ deployment_dir }}/Dockerfile.patroni"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📦 Copy Patroni post_init.sh script (for Docker build)"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../patroni/post_init.sh"
+        dest: "{{ deployment_dir }}/patroni/post_init.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    # ========================================
+    # Task Group 4: Build Docker Images
+    # ========================================
+    - name: "🐋 Build Keycloak Docker image"
+      community.docker.docker_image:
+        name: keycloak_ha-keycloak
+        tag: latest
+        build:
+          path: "{{ deployment_dir }}"
+          dockerfile: Dockerfile
+        source: build
+        state: present
+        force_source: yes
+      register: keycloak_build
+      retries: 2
+      delay: 5
+      until: keycloak_build is not failed
+
+    - name: "🐋 Build Patroni Docker image"
+      community.docker.docker_image:
+        name: keycloak_ha-patroni
+        tag: latest
+        build:
+          path: "{{ deployment_dir }}"
+          dockerfile: Dockerfile.patroni
+        source: build
+        state: present
+        force_source: yes
+      register: patroni_build
+      retries: 2
+      delay: 5
+      until: patroni_build is not failed
+
+    # ========================================
+    # Verification Tasks
+    # ========================================
+    - name: "✅ Verify deployment directory exists"
+      ansible.builtin.stat:
+        path: "{{ deployment_dir }}"
+      register: dir_check
+      failed_when: not dir_check.stat.exists
+
+    - name: "✅ Verify Docker images are built"
+      ansible.builtin.command:
+        cmd: docker images --format "{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}"
+      register: docker_images_output
+      changed_when: false
+      failed_when: >
+        'keycloak_ha-keycloak:latest' not in docker_images_output.stdout or
+        'keycloak_ha-patroni:latest' not in docker_images_output.stdout
+
+    - name: "✅ Display build results"
+      ansible.builtin.debug:
+        msg: |
+          ✅ Host {{ inventory_hostname }} prepared successfully:
+             - Deployment directory: {{ deployment_dir }}
+             - Internal IP: {{ internal_ip }}
+             - Docker images built:
+               • keycloak_ha-keycloak:latest
+               • keycloak_ha-patroni:latest
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 2 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display preparation summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║          KEYCLOAK HA - HOST PREPARATION COMPLETE              ║
+          ║                    Phase 2 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ Deployment directories created on all hosts
+          ✅ Docker images built on all hosts
+          
+          ⚠️  NOTE: No Docker networks created - using host network mode
+          
+          📍 All services will bind to 0.0.0.0 and communicate via:
+             - Internal IP 10.1.0.1 (multiregion-1)
+             - Internal IP 10.1.0.2 (multiregion-2)
+          
+          ✅ System ready for Phase 3: Certificate Generation
+          
+          Next steps:
+             ansible-playbook playbooks/02-generate-certs.yml
+          
+          ═══════════════════════════════════════════════════════════════════

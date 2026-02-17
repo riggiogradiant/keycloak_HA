@@ -1,0 +1,222 @@
+---
+# Playbook: 00-verify-connectivity.yml
+# Purpose: Verify basic connectivity and prerequisites for Keycloak HA deployment
+# Phase: 1 - Infrastructure Setup
+#
+# This playbook performs initial verification before any deployment:
+# 1. Tests Ansible connectivity to both hosts
+# 2. Gathers system facts
+# 3. Verifies network connectivity between nodes
+# 4. Checks Docker installation
+# 5. Verifies required ports are available
+
+- name: Phase 1 - Verify Connectivity and Prerequisites
+  hosts: all
+  gather_facts: yes
+  become: no
+
+  tasks:
+    # ========================================
+    # Task Group 1: Basic Ansible Connectivity
+    # ========================================
+    - name: "✅ Test Ansible ping to all hosts"
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: "📊 Display ping results"
+      ansible.builtin.debug:
+        msg: "✅ Host {{ inventory_hostname }} ({{ ansible_host }}) is reachable via Ansible"
+
+    - name: "🖥️  Display system information"
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Management IP: {{ ansible_host }}
+          Internal IP: {{ internal_ip }}
+          User: {{ ansible_user }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Kernel: {{ ansible_kernel }}
+          Architecture: {{ ansible_architecture }}
+          Total Memory: {{ ansible_memtotal_mb }} MB
+          CPUs: {{ ansible_processor_vcpus }}
+
+    # ========================================
+    # Task Group 2: Network Connectivity Between Nodes
+    # ========================================
+    - name: "🌐 Test connectivity to peer nodes (using internal IPs)"
+      ansible.builtin.command:
+        cmd: "ping -c 3 -W 2 {{ hostvars[item]['internal_ip'] }}"
+      loop: "{{ groups['all'] }}"
+      when: item != inventory_hostname
+      register: peer_ping_result
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display peer connectivity results"
+      ansible.builtin.debug:
+        msg: |
+          {% if peer_ping_result.results is defined %}
+          {% for result in peer_ping_result.results %}
+          {% if not result.skipped is defined and result.rc is defined %}
+          {{ '✅' if result.rc == 0 else '❌' }} Connectivity from {{ inventory_hostname }} to {{ result.item }}: {{ 'OK' if result.rc == 0 else 'FAILED' }}
+          {% endif %}
+          {% endfor %}
+          {% else %}
+          ⚠️  Only one host in inventory, skipping peer connectivity test
+          {% endif %}
+
+    - name: "❌ Fail if peer connectivity failed"
+      ansible.builtin.fail:
+        msg: "Network connectivity test failed between nodes. Check firewall rules and network configuration."
+      when: 
+        - peer_ping_result.results is defined
+        - peer_ping_result.results | selectattr('skipped', 'undefined') | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+
+    # ========================================
+    # Task Group 3: Docker Installation Check
+    # ========================================
+    - name: "🐋 Check if Docker is installed"
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Docker version"
+      ansible.builtin.debug:
+        msg: "{{ '✅' if docker_version.rc == 0 else '❌' }} Docker on {{ inventory_hostname }}: {{ docker_version.stdout if docker_version.rc == 0 else 'NOT INSTALLED' }}"
+
+    - name: "❌ Fail if Docker is not installed"
+      ansible.builtin.fail:
+        msg: |
+          Docker is not installed on {{ inventory_hostname }}.
+          Please install Docker before proceeding.
+          Installation: https://docs.docker.com/engine/install/
+      when: docker_version.rc != 0
+
+    - name: "🐋 Check if Docker Compose is installed"
+      ansible.builtin.command:
+        cmd: docker compose version
+      register: docker_compose_version
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Docker Compose version"
+      ansible.builtin.debug:
+        msg: "{{ '✅' if docker_compose_version.rc == 0 else '❌' }} Docker Compose on {{ inventory_hostname }}: {{ docker_compose_version.stdout if docker_compose_version.rc == 0 else 'NOT INSTALLED' }}"
+
+    - name: "❌ Fail if Docker Compose is not installed"
+      ansible.builtin.fail:
+        msg: |
+          Docker Compose is not installed on {{ inventory_hostname }}.
+          Please install Docker Compose V2 before proceeding.
+          Installation: https://docs.docker.com/compose/install/
+      when: docker_compose_version.rc != 0
+
+    - name: "🐋 Check Docker service status"
+      ansible.builtin.command:
+        cmd: systemctl is-active docker
+      register: docker_service
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Docker service status"
+      ansible.builtin.debug:
+        msg: "{{ '✅' if docker_service.rc == 0 else '❌' }} Docker service on {{ inventory_hostname }}: {{ docker_service.stdout if docker_service.rc == 0 else 'not active' }}"
+
+    - name: "❌ Fail if Docker service is not running"
+      ansible.builtin.fail:
+        msg: |
+          Docker service is not running on {{ inventory_hostname }}.
+          Status: {{ docker_service.stdout | default('unknown') }}
+          Please start Docker: sudo systemctl start docker
+      when: docker_service.rc != 0
+
+    # ========================================
+    # Task Group 4: Port Availability Check
+    # ========================================
+    - name: "🔌 Check if required ports are available (on internal IP)"
+      ansible.builtin.wait_for:
+        host: "{{ internal_ip }}"
+        port: "{{ item }}"
+        state: stopped
+        timeout: 1
+      loop:
+        - 2379  # etcd client
+        - 2380  # etcd peer
+        - 5432  # PostgreSQL
+        - 8008  # Patroni API
+        - 7800  # Keycloak JGroups
+        - 8443  # Keycloak HTTPS
+      register: port_check
+      failed_when: false
+      changed_when: false
+
+    - name: "📊 Display port availability"
+      ansible.builtin.debug:
+        msg: |
+          Port availability on {{ inventory_hostname }}:
+          {% for result in port_check.results %}
+          {{ '✅' if result.failed else '⚠️ ' }} Port {{ result.item }}: {{ 'Available' if result.failed else 'IN USE (may conflict)' }}
+          {% endfor %}
+
+    - name: "⚠️  Warn if ports are in use"
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Some ports are already in use on {{ inventory_hostname }}.
+          This may indicate existing services or a previous deployment.
+          Ports in use: {{ port_check.results | selectattr('failed', 'equalto', false) | map(attribute='item') | list | join(', ') }}
+          Consider stopping existing services or cleaning up previous deployment.
+      when: port_check.results | selectattr('failed', 'equalto', false) | list | length > 0
+
+    # ========================================
+    # Task Group 5: Python Dependencies
+    # ========================================
+    - name: "🐍 Check Python version"
+      ansible.builtin.debug:
+        msg: "✅ Python on {{ inventory_hostname }}: {{ ansible_python_version }}"
+
+    - name: "🐍 Verify Python 3 is available"
+      ansible.builtin.assert:
+        that:
+          - ansible_python_version is version('3.6', '>=')
+        fail_msg: "Python 3.6 or higher is required. Found: {{ ansible_python_version }}"
+        success_msg: "Python version check passed: {{ ansible_python_version }}"
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 1 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display deployment readiness summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║          KEYCLOAK HA - CONNECTIVITY VERIFICATION               ║
+          ║                    Phase 1 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ All hosts are reachable via Ansible
+          ✅ Network connectivity between nodes verified
+          ✅ Docker and Docker Compose installed
+          ✅ Docker service is running
+          ✅ Python dependencies satisfied
+          
+          📍 Hosts configured:
+          {% for host in groups['all'] %}
+             - {{ host }}:
+               • Management IP: {{ hostvars[host]['ansible_host'] }} (SSH: {{ hostvars[host]['ansible_user'] }})
+               • Internal IP: {{ hostvars[host]['internal_ip'] }} (services communication)
+          {% endfor %}
+          
+          ✅ System is ready for Phase 2: Host Preparation
+          
+          Next steps:
+             ansible-playbook playbooks/01-prepare-hosts.yml
+          
+          ═══════════════════════════════════════════════════════════════════

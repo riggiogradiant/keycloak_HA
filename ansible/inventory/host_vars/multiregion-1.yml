@@ -1,0 +1,22 @@
+---
+# Host-specific variables for multiregion-1 (10.11.5.71)
+# Management IP: 10.11.5.71 (for SSH/Ansible)
+# Internal IP: 10.1.0.1 (for service communication)
+
+# Node identification
+node_id: 1
+is_bootstrap_node: true
+
+# etcd specific (uses internal IP for cluster communication)
+etcd_initial_advertise_peer_urls: "http://{{ internal_ip }}:{{ etcd_peer_port }}"
+etcd_advertise_client_urls: "http://{{ internal_ip }}:{{ etcd_client_port }}"
+
+# Patroni specific (uses internal IP for cluster communication)
+patroni_connect_address: "{{ internal_ip }}:{{ patroni_api_port }}"
+postgres_connect_address: "{{ internal_ip }}:{{ postgres_port }}"
+
+# HAProxy bind addresses
+haproxy_bind_address: "0.0.0.0"
+
+# Keycloak specific (uses internal IP for JGroups clustering)
+keycloak_hostname: "{{ internal_ip }}"

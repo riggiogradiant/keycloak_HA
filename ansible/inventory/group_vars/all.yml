@@ -1,0 +1,108 @@
+---
+# Global variables for Keycloak HA deployment
+# These apply to all hosts in the inventory
+
+# ========================================
+# Deployment Configuration
+# ========================================
+project_name: keycloak_ha
+deployment_dir: "/home/{{ ansible_user }}/ansible"
+docker_compose_project_name: keycloak_ha
+
+# ========================================
+# Docker Images & Versions
+# ========================================
+keycloak_version: "26.0.0"
+keycloak_image: "quay.io/keycloak/keycloak:{{ keycloak_version }}"
+postgres_version: "15"
+postgres_image: "postgres:{{ postgres_version }}"
+patroni_version: "3.2.2"
+haproxy_version: "2.9-alpine"
+haproxy_image: "haproxy:{{ haproxy_version }}"
+etcd_version: "3.5.10"
+etcd_image: "quay.io/coreos/etcd:v{{ etcd_version }}"
+
+# ========================================
+# PostgreSQL Credentials
+# ========================================
+postgres_user: postgres
+postgres_password: keycloak_secret
+postgres_admin_password: postgres_admin
+postgres_db: keycloak
+postgres_keycloak_user: keycloak
+postgres_keycloak_password: keycloak_secret
+replication_user: replicator
+replication_password: replicator_secret
+
+# ========================================
+# Keycloak Credentials
+# ========================================
+keycloak_admin: admin
+keycloak_admin_password: admin
+keycloak_log_level: info
+
+# ========================================
+# Patroni Configuration
+# ========================================
+patroni_scope: keycloak-postgres-cluster
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 10
+patroni_maximum_lag_on_failover: 1048576  # 1MB
+
+# ========================================
+# etcd Configuration
+# ========================================
+etcd_cluster_token: keycloak-etcd-cluster
+etcd_initial_cluster_state: new
+
+# ========================================
+# SSL/TLS Configuration
+# ========================================
+cert_domain: localhost
+cert_days_valid: 3650
+certs_dir: "{{ deployment_dir }}/certs"
+
+# ========================================
+# Network Configuration
+# ========================================
+# These will be populated dynamically from inventory
+# NOTE: Uses internal_ip for inter-service communication (private network)
+etcd_cluster_endpoints: >-
+  {% set endpoints = [] %}
+  {% for host in groups['etcd_cluster'] %}
+  {{ endpoints.append(hostvars[host]['internal_ip'] + ':' + hostvars[host]['etcd_client_port']|string) or '' }}
+  {% endfor %}
+  {{- endpoints | join(',') -}}
+
+postgres_cluster_hosts: >-
+  {% set hosts = [] %}
+  {% for host in groups['postgres_cluster'] %}
+  {{ hosts.append(hostvars[host]['internal_ip'] + ':' + hostvars[host]['postgres_port']|string) or '' }}
+  {% endfor %}
+  {{- hosts | join(',') -}}
+
+keycloak_cluster_hosts: >-
+  {% set hosts = [] %}
+  {% for host in groups['keycloak_nodes'] %}
+  {{ hosts.append(hostvars[host]['internal_ip'] + '[' + hostvars[host]['keycloak_jgroups_port']|string + ']') or '' }}
+  {% endfor %}
+  {{- hosts | join('\\,') -}}
+
+# ========================================
+# Firewall Ports
+# ========================================
+# Ports that need to be opened in firewall for inter-node communication
+firewall_ports:
+  - 2379/tcp   # etcd client
+  - 2380/tcp   # etcd peer
+  - 5432/tcp   # PostgreSQL
+  - 8008/tcp   # Patroni REST API
+  - 7800/tcp   # Keycloak JGroups
+  - 8443/tcp   # Keycloak HTTPS
+
+# ========================================
+# Health Check Configuration
+# ========================================
+health_check_retries: 30
+health_check_delay: 10

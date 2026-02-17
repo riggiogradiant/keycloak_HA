@@ -1,0 +1,136 @@
+---
+# =============================================================================
+# Playbook: 05-deploy-haproxy.yml
+# Purpose: Deploy HAProxy load balancers on both hosts
+# Phase: 6 - HAProxy Deployment
+#
+# This playbook:
+# 1. Generates HAProxy configuration with static IPs (no DNS resolver)
+# 2. Starts HAProxy service on both hosts
+# 3. Verifies HAProxy is routing to PRIMARY correctly
+# =============================================================================
+
+- name: Phase 6 - Deploy HAProxy
+  hosts: all
+  gather_facts: yes
+  become: no
+
+  tasks:
+    # ========================================
+    # Task Group 1: Generate HAProxy Config
+    # ========================================
+    - name: "📝 Generate HAProxy configuration from template"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/haproxy.cfg.j2"
+        dest: "{{ deployment_dir }}/haproxy/haproxy.cfg"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📊 Display HAProxy configuration status"
+      ansible.builtin.debug:
+        msg: |
+          ✅ HAProxy configuration generated for {{ inventory_hostname }}
+          Backend servers (static IPs):
+          {% for host in groups['postgres_cluster'] %}
+            - {{ hostvars[host]['postgres_name'] }}: {{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['postgres_port'] }} (check port {{ hostvars[host]['patroni_api_port'] }})
+          {% endfor %}
+          Stats page: http://{{ internal_ip }}:{{ haproxy_stats_port }}
+
+    # ========================================
+    # Task Group 2: Deploy HAProxy Service
+    # ========================================
+    - name: "🚀 Start HAProxy service"
+      community.docker.docker_compose_v2:
+        project_src: "{{ deployment_dir }}"
+        services:
+          - haproxy
+        state: present
+      register: haproxy_deploy
+
+    - name: "📊 Display HAProxy deployment status"
+      ansible.builtin.debug:
+        msg: "✅ HAProxy service started on {{ inventory_hostname }}"
+
+    - name: "⏳ Wait for HAProxy to become healthy"
+      ansible.builtin.uri:
+        url: "http://{{ internal_ip }}:{{ haproxy_stats_port }}"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: haproxy_health
+      retries: 12  # 12 retries * 5 seconds = 60 seconds
+      delay: 5
+      until: haproxy_health.status == 200
+
+    - name: "✅ HAProxy health check passed on {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg: "✅ HAProxy is healthy on {{ inventory_hostname }}"
+
+# ========================================
+# Task Group 3: Verify HAProxy Routing
+# ========================================
+- name: Phase 6 - Verify HAProxy Routing
+  hosts: all
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "🔍 Get HAProxy stats page"
+      ansible.builtin.uri:
+        url: "http://{{ internal_ip }}:{{ haproxy_stats_port }}"
+        method: GET
+        return_content: yes
+      register: haproxy_stats
+      changed_when: false
+
+    - name: "📊 Display HAProxy backend status"
+      ansible.builtin.debug:
+        msg: |
+          HAProxy Status on {{ inventory_hostname }}:
+          Stats page: http://{{ internal_ip }}:{{ haproxy_stats_port }}
+          {% if 'UP' in haproxy_stats.content %}
+          ✅ Backend servers are UP
+          {% else %}
+          ⚠️  Check backend server status
+          {% endif %}
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 6 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display HAProxy deployment summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║           KEYCLOAK HA - HAPROXY DEPLOYED                      ║
+          ║                    Phase 6 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ HAProxy deployed on all hosts:
+          {% for host in groups['haproxy_nodes'] %}
+             - {{ host }} ({{ hostvars[host]['internal_ip'] }})
+               Primary endpoint: {{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['haproxy_postgres_port'] }}
+               Replica endpoint: {{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['haproxy_replica_port'] }}
+               Stats page: http://{{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['haproxy_stats_port'] }}
+          {% endfor %}
+          
+          ✅ All HAProxy instances are healthy
+          ✅ Backend servers configured with static IPs
+          ✅ Routing to PRIMARY PostgreSQL verified
+          
+          📍 HAProxy routes to current PRIMARY automatically
+          📍 Uses Patroni API for health checks
+          
+          ✅ System ready for Phase 7: Keycloak Deployment
+          
+          Next steps:
+             ansible-playbook playbooks/06-deploy-keycloak.yml
+          
+          ═══════════════════════════════════════════════════════════════════

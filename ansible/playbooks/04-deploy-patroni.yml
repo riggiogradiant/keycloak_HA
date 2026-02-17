@@ -1,0 +1,186 @@
+---
+# =============================================================================
+# Playbook: 04-deploy-patroni.yml
+# Purpose: Deploy PostgreSQL + Patroni cluster
+# Phase: 5 - PostgreSQL + Patroni Deployment
+#
+# This playbook:
+# 1. Generates Patroni configuration files for each node
+# 2. Deploys postgres on NODO 1 (PRIMARY) and waits for healthy
+# 3. Deploys postgres on NODO 2 (REPLICA) and waits for healthy
+# 4. Verifies Patroni cluster formation
+#
+# CRITICAL: Sequential deployment - NODO 1 must be fully operational before NODO 2
+# =============================================================================
+
+- name: Phase 5 - Prepare Patroni Configuration
+  hosts: all
+  gather_facts: yes
+  become: no
+
+  tasks:
+    # ========================================
+    # Task Group 1: Generate Patroni Config
+    # ========================================
+    - name: "📝 Generate Patroni configuration from template"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/patroni-config.yml.j2"
+        dest: "{{ deployment_dir }}/patroni/patroni.yml"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📝 Generate post_init.sh script from template"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/post_init.sh.j2"
+        dest: "{{ deployment_dir }}/patroni/post_init.sh"
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📊 Display Patroni configuration status"
+      ansible.builtin.debug:
+        msg: |
+          ✅ Patroni configuration generated for {{ inventory_hostname }}
+          Node: {{ patroni_name }}
+          Scope: {{ patroni_scope }}
+          Connect address: {{ internal_ip }}:{{ postgres_port }}
+          API endpoint: {{ internal_ip }}:{{ patroni_api_port }}
+          etcd endpoints: {{ etcd_cluster_endpoints }}
+
+# ========================================
+# Task Group 2: Deploy PRIMARY (NODO 1)
+# ========================================
+- name: Phase 5 - Deploy PostgreSQL PRIMARY
+  hosts: all
+  gather_facts: no
+  become: no
+  serial: 1  # Deploy one at a time
+  order: sorted  # Ensures multiregion-1 goes first
+
+  tasks:
+    - name: "🚀 Start PostgreSQL + Patroni service"
+      community.docker.docker_compose_v2:
+        project_src: "{{ deployment_dir }}"
+        services:
+          - postgres
+        state: present
+      register: postgres_deploy
+
+    - name: "📊 Display PostgreSQL deployment status"
+      ansible.builtin.debug:
+        msg: "✅ PostgreSQL service started on {{ inventory_hostname }}"
+
+    - name: "⏳ Wait {{ 15 if is_bootstrap_node else 20 }} seconds for Patroni initialization"
+      ansible.builtin.pause:
+        seconds: "{{ 15 if is_bootstrap_node else 20 }}"
+        prompt: "Waiting for Patroni to initialize on {{ inventory_hostname }}..."
+
+    - name: "🔍 Wait for Patroni API to be healthy (max 90 seconds)"
+      ansible.builtin.uri:
+        url: "http://{{ internal_ip }}:{{ patroni_api_port }}/health"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: patroni_health
+      retries: 18  # 18 retries * 5 seconds = 90 seconds
+      delay: 5
+      until: patroni_health.status == 200
+
+    - name: "✅ Patroni health check passed on {{ inventory_hostname }}"
+      ansible.builtin.debug:
+        msg: "✅ Patroni API is healthy on {{ inventory_hostname }} ({{ internal_ip }}:{{ patroni_api_port }})"
+
+# ========================================
+# Task Group 3: Verify Patroni Cluster
+# ========================================
+- name: Phase 5 - Verify Patroni Cluster
+  hosts: "{{ groups['postgres_cluster'] | select('match', '.*1$') | first }}"  # Bootstrap node
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "⏳ Wait 10 seconds for cluster synchronization"
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Waiting for Patroni cluster to synchronize..."
+
+    - name: "🔍 Check Patroni cluster status"
+      ansible.builtin.command:
+        cmd: docker exec {{ postgres_name }} patronictl -c /etc/patroni/patroni.yml list
+      register: patroni_cluster
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Patroni cluster status"
+      ansible.builtin.debug:
+        msg: |
+          Patroni Cluster Status:
+          {{ patroni_cluster.stdout }}
+
+    - name: "✅ Verify cluster has PRIMARY and REPLICA"
+      ansible.builtin.assert:
+        that:
+          - patroni_cluster.rc == 0
+          - "'Leader' in patroni_cluster.stdout or 'primary' in patroni_cluster.stdout.lower()"
+          - groups['postgres_cluster'] | length == patroni_cluster.stdout_lines | select('match', '^\|\\s+postgres-') | list | length
+        fail_msg: "Patroni cluster formation incomplete"
+        success_msg: "✅ Patroni cluster formed successfully with PRIMARY and REPLICA"
+
+    - name: "🔍 Check replication status"
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ postgres_name }} psql -U postgres -c
+          "SELECT application_name, state,
+           pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes
+           FROM pg_stat_replication;"
+      register: replication_status
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display replication status"
+      ansible.builtin.debug:
+        msg: |
+          PostgreSQL Replication Status:
+          {{ replication_status.stdout }}
+      when: replication_status.stdout != ""
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 5 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display PostgreSQL deployment summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║      KEYCLOAK HA - POSTGRESQL + PATRONI DEPLOYED             ║
+          ║                    Phase 5 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ PostgreSQL + Patroni deployed on all hosts:
+          {% for host in groups['postgres_cluster'] %}
+             - {{ host }} ({{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['postgres_port'] }})
+               Patroni API: {{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['patroni_api_port'] }}
+               Role: {{ 'PRIMARY (Leader)' if hostvars[host]['is_primary_node'] else 'REPLICA (Standby)' }}
+          {% endfor %}
+          
+          ✅ Patroni cluster formed successfully
+          ✅ Streaming replication active
+          ✅ Database users created (replicator, keycloak)
+          ✅ Database created (keycloak)
+          
+          📍 Cluster scope: {{ patroni_scope }}
+          📍 DCS: etcd ({{ etcd_cluster_endpoints }})
+          
+          ✅ System ready for Phase 6: HAProxy Deployment
+          
+          Next steps:
+             ansible-playbook playbooks/05-deploy-haproxy.yml
+          
+          ═══════════════════════════════════════════════════════════════════

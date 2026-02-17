@@ -79,6 +79,198 @@ NODO 2:
 
 ---
 
+## Multi-Host Deployment with Ansible
+
+### Physical Infrastructure
+
+The system is designed to run on **2 separate physical machines** in a true distributed architecture:
+
+**Physical Hosts**:
+```
+multiregion-1:
+├── Management IP: 10.11.5.71 (SSH access)
+├── Internal IP: 10.1.0.1 (service communication)
+├── User: fhaas
+├── Specs: Ubuntu 24.04, 8 CPUs, 32GB RAM
+└── Services: etcd-nodo1, postgres-nodo1, haproxy-nodo1, keycloak-nodo1
+
+multiregion-2:
+├── Management IP: 10.5.4.161 (SSH access)
+├── Internal IP: 10.1.0.2 (service communication)
+├── User: tdx
+├── Specs: Ubuntu 24.04, 4 CPUs, 32GB RAM
+└── Services: etcd-nodo2, postgres-nodo2, haproxy-nodo2, keycloak-nodo2
+```
+
+### Dual Network Architecture
+
+**CRITICAL**: The system uses **two separate IP addresses** per host:
+
+1. **Management Network** (for SSH/Ansible):
+   - multiregion-1: `10.11.5.71`
+   - multiregion-2: `10.5.4.161`
+   - Purpose: Ansible connects via SSH to these IPs for orchestration
+   - Used by: Ansible playbooks, manual SSH access
+
+2. **Internal Network** (for service communication):
+   - multiregion-1: `10.1.0.1`
+   - multiregion-2: `10.1.0.2`
+   - Purpose: All inter-service communication (etcd, Patroni, Keycloak clustering)
+   - Used by: etcd peer communication, PostgreSQL replication, JGroups clustering
+
+**Why Two Networks?**:
+- **Security**: Separates control plane (SSH) from data plane (services)
+- **Performance**: Internal network optimized for high-bandwidth service communication
+- **Isolation**: Management traffic doesn't interfere with cluster traffic
+
+### Ansible Deployment Structure
+
+```
+ansible/
+├── ansible.cfg                    # Ansible configuration (SSH settings, no sudo)
+├── inventory/
+│   └── hosts.yml                  # Physical hosts with dual IPs and role assignments
+├── group_vars/
+│   └── all.yml                    # Global variables (uses internal_ip for services)
+├── host_vars/
+│   ├── multiregion-1.yml          # Node 1 specific config (internal_ip: 10.1.0.1)
+│   └── multiregion-2.yml          # Node 2 specific config (internal_ip: 10.1.0.2)
+└── playbooks/
+    ├── 00-verify-connectivity.yml # Phase 1: Verify SSH + network connectivity
+    ├── 01-prepare-hosts.yml       # Phase 2: Install Docker, configure firewall
+    ├── 02-generate-certs.yml      # Phase 3: Generate SSL certificates
+    ├── 03-deploy-etcd.yml         # Phase 4: Deploy etcd cluster
+    ├── 04-deploy-patroni.yml      # Phase 5: Deploy PostgreSQL + Patroni
+    ├── 05-deploy-haproxy.yml      # Phase 6: Deploy HAProxy
+    ├── 06-deploy-keycloak.yml     # Phase 7: Deploy Keycloak
+    ├── 07-test-cluster.yml        # Phase 8: Test cluster health
+    └── 08-test-failover.yml       # Phase 9: Test failover (optional)
+```
+
+### Key Ansible Configuration Patterns
+
+**Inventory (`inventory/hosts.yml`)**:
+```yaml
+all:
+  hosts:
+    multiregion-1:
+      ansible_host: 10.11.5.71      # Management IP (SSH)
+      internal_ip: 10.1.0.1          # Internal IP (services)
+      ansible_user: fhaas
+      node_name: nodo1
+    
+    multiregion-2:
+      ansible_host: 10.5.4.161      # Management IP (SSH)
+      internal_ip: 10.1.0.2          # Internal IP (services)
+      ansible_user: tdx
+      node_name: nodo2
+```
+
+**Service Configuration (`group_vars/all.yml`)**:
+All service endpoints use `internal_ip` for communication:
+```yaml
+# etcd cluster endpoints (internal IPs)
+etcd_cluster_endpoints: "10.1.0.1:2379,10.1.0.2:2379"
+
+# Patroni connect addresses (internal IPs)
+patroni_connect_address: "{{ internal_ip }}:8008"
+postgres_connect_address: "{{ internal_ip }}:5432"
+
+# Keycloak JGroups clustering (internal IPs)
+keycloak_cluster_hosts: "10.1.0.1[7800],10.1.0.2[7800]"
+```
+
+**Important**: SSH connectivity (ansible_host) and service connectivity (internal_ip) are **completely independent**. Services never use management IPs.
+
+### Ansible vs Docker Compose Deployment
+
+**Original Single-Host (docker-compose-nodo1.yaml + docker-compose-nodo2.yaml)**:
+- Both nodes run on **same machine** (localhost)
+- Uses Docker network (keycloak_net) for communication
+- Manual deployment with `./deploy-ha.sh`
+- Services reference each other by Docker DNS (etcd-nodo1, postgres-nodo2)
+
+**New Multi-Host (Ansible)**:
+- Nodes run on **separate physical machines** (10.11.5.71 and 10.5.4.161)
+- Uses physical network (10.1.0.1 ↔ 10.1.0.2) for communication
+- Automated deployment with Ansible playbooks
+- Services reference each other by internal IPs, not Docker DNS
+
+**Critical Differences**:
+1. **Service Discovery**: Multi-host uses static IPs (10.1.0.1, 10.1.0.2), not Docker DNS
+2. **Network**: Physical network requires firewall rules (ports 2379, 2380, 5432, 8008, 7800, 8443)
+3. **Certificates**: Must include internal IPs in SAN (Subject Alternative Names)
+4. **HAProxy**: Backend servers use internal IPs, not container names
+5. **etcd Initial Cluster**: Uses internal IPs, not Docker hostnames
+
+### Deployment Workflow with Ansible
+
+```bash
+# From control machine (your laptop)
+cd ansible/
+
+# Phase 1: Verify connectivity and prerequisites
+ansible-playbook playbooks/00-verify-connectivity.yml
+# Checks: SSH access, Docker installed, network connectivity (10.1.0.1 ↔ 10.1.0.2)
+
+# Phase 2: Prepare hosts
+ansible-playbook playbooks/01-prepare-hosts.yml
+# Actions: Configure firewall, create directories, copy configs
+
+# Phase 3-7: Deploy services incrementally
+ansible-playbook playbooks/02-generate-certs.yml    # SSL certs with internal IPs
+ansible-playbook playbooks/03-deploy-etcd.yml       # etcd cluster on both hosts
+ansible-playbook playbooks/04-deploy-patroni.yml    # PostgreSQL HA
+ansible-playbook playbooks/05-deploy-haproxy.yml    # Query routers
+ansible-playbook playbooks/06-deploy-keycloak.yml   # Keycloak Active-Active
+
+# Phase 8: Verify cluster health
+ansible-playbook playbooks/07-test-cluster.yml
+```
+
+### Network Connectivity Verification
+
+**Testing SSH (Management Network)**:
+```bash
+# From control machine
+ssh fhaas@10.11.5.71 "echo OK"    # multiregion-1
+ssh tdx@10.5.4.161 "echo OK"       # multiregion-2
+
+# Ansible ping module (tests SSH + Python)
+ansible all -m ping
+```
+
+**Testing Internal Network (Service Communication)**:
+```bash
+# ICMP ping between internal IPs
+ssh fhaas@10.11.5.71 "ping -c 3 10.1.0.2"    # nodo1 → nodo2
+ssh tdx@10.5.4.161 "ping -c 3 10.1.0.1"       # nodo2 → nodo1
+
+# Test service ports (e.g., etcd)
+ssh fhaas@10.11.5.71 "nc -zv 10.1.0.2 2379"  # Check etcd reachable
+```
+
+**Common Pitfall**: `ansible.builtin.ping` is NOT ICMP ping - it tests SSH connectivity to `ansible_host`, not network layer connectivity to `internal_ip`.
+
+### Firewall Rules for Multi-Host
+
+**Required ports on internal network** (10.1.0.1 ↔ 10.1.0.2):
+```bash
+# On both hosts, allow from peer's internal IP
+sudo ufw allow from 10.1.0.1 to any port 2379,2380,5432,8008,7800,8443 proto tcp  # On multiregion-2
+sudo ufw allow from 10.1.0.2 to any port 2379,2380,5432,8008,7800,8443 proto tcp  # On multiregion-1
+```
+
+**Port Reference for Multi-Host**:
+- 2379: etcd client (internal communication)
+- 2380: etcd peer (cluster sync)
+- 5432: PostgreSQL (Patroni replication)
+- 8008: Patroni REST API (HAProxy health checks)
+- 7800: Keycloak JGroups (session replication)
+- 8443: Keycloak HTTPS (user access - optional on internal network)
+
+---
+
 ## Project Structure
 
 ```
@@ -327,6 +519,54 @@ docker exec postgres-nodo1 patronictl -c /etc/patroni/patroni.yml list
 2. Check disk I/O on REPLICA
 3. Consider enabling synchronous replication for zero lag guarantee
 
+### Issue: Ansible SSH Timeout (Multi-Host Deployment)
+
+**Symptoms**:
+```
+UNREACHABLE! => {"changed": false, "msg": "Connection to 10.5.4.161 port 22 timed out"}
+```
+
+**Diagnosis**:
+```bash
+# Test SSH directly
+ssh tdx@10.5.4.161 "echo OK"
+
+# Test port availability
+nc -zv 10.5.4.161 22
+
+# Check if fail2ban is blocking
+sudo fail2ban-client status sshd
+```
+
+**Solutions**:
+1. Verify SSH service is running: `systemctl status sshd`
+2. Check firewall allows SSH from control machine: `sudo ufw status`
+3. Unban IP if fail2ban blocked: `sudo fail2ban-client unban <control_machine_IP>`
+4. Verify network connectivity (try ICMP ping first): `ping 10.5.4.161`
+
+**Important**: `ansible.builtin.ping` tests SSH connectivity (management network), not ICMP. Internal network connectivity is independent.
+
+### Issue: Service Cannot Resolve Hostnames (Multi-Host)
+
+**Symptoms**:
+```
+docker logs etcd-nodo1
+# Shows: cannot dial peer: dial tcp: lookup etcd-nodo2: no such host
+```
+
+**Diagnosis**: Using Docker DNS names instead of static IPs in multi-host deployment.
+
+**Solution**: Ensure all service configurations use `internal_ip` (10.1.0.1, 10.1.0.2) instead of Docker hostnames:
+```yaml
+# WRONG (Docker Compose single-host):
+--initial-advertise-peer-urls=http://etcd-nodo2:2380
+
+# CORRECT (Ansible multi-host):
+--initial-advertise-peer-urls=http://10.1.0.2:2380
+```
+
+Check `group_vars/all.yml` and `host_vars/*.yml` all use `{{ internal_ip }}` templating.
+
 ---
 
 ## Test Suite
@@ -494,6 +734,8 @@ When PRIMARY fails:
 
 ## Quick Command Reference
 
+### Single-Host Deployment (Docker Compose)
+
 ```bash
 # View cluster status
 docker exec postgres-nodo1 patronictl -c /etc/patroni/patroni.yml list
@@ -512,6 +754,44 @@ docker logs keycloak-nodo1 2>&1 | grep "cluster view" | tail -1
 # Clean everything (DESTROYS DATA)
 docker compose -p nodo1 -f docker-compose-nodo1.yaml down -v
 docker compose -p nodo2 -f docker-compose-nodo2.yaml down -v
+```
+
+### Multi-Host Deployment (Ansible)
+
+```bash
+# Test connectivity to all hosts
+ansible all -m ping
+
+# Test internal network connectivity
+ansible all -m shell -a "ping -c 3 {{ hostvars['multiregion-2']['internal_ip'] }}"
+
+# Run a command on all hosts
+ansible all -m shell -a "docker ps"
+
+# Check cluster status from multiregion-1
+ansible multiregion-1 -m shell -a "docker exec postgres-nodo1 patronictl -c /etc/patroni/patroni.yml list"
+
+# Check Keycloak clustering
+ansible keycloak_nodes -m shell -a "docker logs keycloak-nodo1 2>&1 | grep 'cluster view' | tail -1"
+
+# Stop all containers on all hosts
+ansible all -m shell -a "docker stop \$(docker ps -aq)" 
+# Note: This will fail with "non-zero return code" if no containers, use -b to continue
+
+# View HAProxy stats from both nodes
+ansible haproxy_nodes -m shell -a "curl -s http://localhost:7000"
+
+# Deploy full stack
+cd ansible/
+ansible-playbook playbooks/00-verify-connectivity.yml  # Phase 1
+ansible-playbook playbooks/01-prepare-hosts.yml        # Phase 2
+# ... continue through Phase 9
+
+# Check if ports are listening on internal IP
+ansible all -m shell -a "ss -tulpn | grep '{{ internal_ip }}'"
+
+# Verify firewall rules
+ansible all -m shell -a "sudo ufw status numbered"
 ```
 
 ---

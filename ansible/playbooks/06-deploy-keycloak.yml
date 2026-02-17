@@ -1,0 +1,189 @@
+---
+# =============================================================================
+# Playbook: 06-deploy-keycloak.yml
+# Purpose: Deploy Keycloak application servers with Infinispan clustering
+# Phase: 7 - Keycloak Deployment
+#
+# This playbook:
+# 1. Deploys Keycloak on NODO 1 and waits 20 seconds
+# 2. Deploys Keycloak on NODO 2 and waits 10 seconds
+# 3. Verifies Infinispan cluster formation (2 members expected)
+#
+# CRITICAL: Sequential deployment with specific wait times for cluster formation
+# =============================================================================
+
+- name: Phase 7 - Deploy Keycloak
+  hosts: all
+  gather_facts: no
+  become: no
+  serial: 1  # Deploy one at a time
+  order: sorted  # Ensures multiregion-1 goes first
+
+  tasks:
+    # ========================================
+    # Task Group 1: Deploy Keycloak Service
+    # ========================================
+    - name: "🚀 Start Keycloak service on {{ inventory_hostname }}"
+      community.docker.docker_compose_v2:
+        project_src: "{{ deployment_dir }}"
+        services:
+          - keycloak
+        state: present
+      register: keycloak_deploy
+
+    - name: "📊 Display Keycloak deployment status"
+      ansible.builtin.debug:
+        msg: |
+          ✅ Keycloak service started on {{ inventory_hostname }}
+          HTTPS endpoint: https://{{ internal_ip }}:{{ keycloak_https_port }}
+          Database: {{ internal_ip }}:{{ haproxy_postgres_port }}/{{ postgres_db }}
+          JGroups discovery: TCPPING ({{ keycloak_cluster_hosts }})
+
+    - name: "⏳ Wait {{ 20 if is_bootstrap_node else 10 }} seconds for Keycloak initialization"
+      ansible.builtin.pause:
+        seconds: "{{ 20 if is_bootstrap_node else 10 }}"
+        prompt: "Waiting for Keycloak to initialize on {{ inventory_hostname }}..."
+
+# ========================================
+# Task Group 2: Wait for Keycloak Startup
+# ========================================
+- name: Phase 7 - Wait for Keycloak Full Startup
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "⏳ Wait additional 120 seconds for Keycloak full startup and cluster formation"
+      ansible.builtin.pause:
+        seconds: 120
+        prompt: "Waiting for Keycloak full startup (database migration, Infinispan cluster)..."
+
+# ========================================
+# Task Group 3: Verify Keycloak Clustering
+# ========================================
+- name: Phase 7 - Verify Keycloak Cluster
+  hosts: all
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "🔍 Check Keycloak logs for cluster view"
+      ansible.builtin.command:
+        cmd: docker logs {{ keycloak_name }} --tail 100
+      register: keycloak_logs
+      changed_when: false
+      failed_when: false
+
+    - name: "🔍 Extract cluster view from logs"
+      ansible.builtin.shell:
+        cmd: docker logs {{ keycloak_name }} 2>&1 | grep -i "cluster view" | tail -1
+      register: cluster_view
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Keycloak cluster view"
+      ansible.builtin.debug:
+        msg: |
+          Keycloak Cluster View on {{ inventory_hostname }}:
+          {{ cluster_view.stdout if cluster_view.stdout != "" else "No cluster view found yet (may still be initializing)" }}
+
+    - name: "🔍 Check if Keycloak health endpoint is ready"
+      ansible.builtin.uri:
+        url: "https://{{ internal_ip }}:{{ keycloak_https_port }}/health/ready"
+        method: GET
+        status_code: [200, 503]  # 503 is OK during startup
+        validate_certs: no
+        timeout: 10
+      register: keycloak_health
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display Keycloak health status"
+      ansible.builtin.debug:
+        msg: |
+          Keycloak Health on {{ inventory_hostname }}:
+          Status Code: {{ keycloak_health.status | default('unreachable') }}
+          {% if keycloak_health.status == 200 %}
+          ✅ Keycloak is READY
+          {% elif keycloak_health.status == 503 %}
+          ⚠️  Keycloak is starting (503 Service Unavailable - normal during startup)
+          {% else %}
+          ⚠️  Keycloak health check failed
+          {% endif %}
+
+# ========================================
+# Task Group 4: Verify Infinispan Cluster
+# ========================================
+- name: Phase 7 - Verify Infinispan Cluster Formation
+  hosts: "{{ groups['keycloak_nodes'][0] }}"  # Check from first node
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "🔍 Wait and check for Infinispan cluster members"
+      ansible.builtin.shell:
+        cmd: docker logs {{ keycloak_name }} 2>&1 | grep -i "cluster view" | tail -1
+      register: final_cluster_view
+      retries: 6
+      delay: 10
+      until: final_cluster_view.stdout != "" and "2" in final_cluster_view.stdout
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display final Infinispan cluster status"
+      ansible.builtin.debug:
+        msg: |
+          Final Infinispan Cluster View:
+          {{ final_cluster_view.stdout }}
+          
+          {% if final_cluster_view.stdout != "" and "2" in final_cluster_view.stdout %}
+          ✅ Infinispan cluster formed with 2 members
+          {% else %}
+          ⚠️  Infinispan cluster may still be forming (this can take several minutes)
+          Check logs: ansible keycloak_nodes -m shell -a "docker logs {{ keycloak_name }} | grep 'cluster view'"
+          {% endif %}
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 7 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display Keycloak deployment summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║           KEYCLOAK HA - KEYCLOAK DEPLOYED                     ║
+          ║                    Phase 7 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ Keycloak deployed on all hosts:
+          {% for host in groups['keycloak_nodes'] %}
+             - {{ host }} ({{ hostvars[host]['internal_ip'] }})
+               HTTPS: https://{{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['keycloak_https_port'] }}
+               JGroups: {{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['keycloak_jgroups_port'] }}
+          {% endfor %}
+          
+          ✅ Keycloak services started
+          ✅ Database connections configured (via HAProxy)
+          ✅ Infinispan clustering configured (TCPPING discovery)
+          
+          📍 Admin Console: https://{{ hostvars[groups['keycloak_nodes'][0]]['internal_ip'] }}:{{ hostvars[groups['keycloak_nodes'][0]]['keycloak_https_port'] }}
+          📍 Admin credentials: {{ keycloak_admin }} / {{ keycloak_admin_password }}
+          
+          ⚠️  NOTE: Keycloak may take 2-3 minutes to fully start and form cluster
+          ⚠️  First startup includes database migration which can be slow
+          
+          🔍 Check cluster status:
+             ansible keycloak_nodes -m shell -a "docker logs keycloak-nodo1 2>&1 | grep 'cluster view' | tail -1"
+          
+          ✅ System ready for Phase 8: Cluster Testing
+          
+          Next steps:
+             ansible-playbook playbooks/07-test-cluster.yml
+          
+          ═══════════════════════════════════════════════════════════════════

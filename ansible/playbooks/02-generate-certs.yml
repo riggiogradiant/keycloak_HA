@@ -1,0 +1,160 @@
+---
+# =============================================================================
+# Playbook: 02-generate-certs.yml
+# Purpose: Generate SSL certificates and distribute to all hosts
+# Phase: 3 - Certificate Generation
+#
+# This playbook:
+# 1. Generates SSL/TLS certificates on control machine with internal IPs in SAN
+# 2. Distributes certificates to all deployment hosts
+# =============================================================================
+
+- name: Phase 3 - Generate and Distribute SSL Certificates
+  hosts: localhost
+  gather_facts: yes
+  become: no
+
+  vars:
+    temp_cert_dir: "/tmp/keycloak_ha_certs_{{ ansible_date_time.epoch }}"
+
+  tasks:
+    # ========================================
+    # Task Group 1: Generate Certificates
+    # ========================================
+    - name: "🔐 Create temporary directory for certificates"
+      ansible.builtin.file:
+        path: "{{ temp_cert_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: "🔐 Generate SSL private key"
+      ansible.builtin.command:
+        cmd: >
+          openssl genrsa -out {{ temp_cert_dir }}/tls.key 2048
+      register: key_gen
+      changed_when: key_gen.rc == 0
+
+    - name: "🔐 Generate SSL certificate with internal IPs in SAN"
+      ansible.builtin.command:
+        cmd: >
+          openssl req -new -x509 -key {{ temp_cert_dir }}/tls.key
+          -out {{ temp_cert_dir }}/tls.crt
+          -days {{ cert_days_valid }}
+          -subj "/CN={{ cert_domain }}/O=Keycloak HA/C=ES"
+          -addext "subjectAltName=DNS:localhost,DNS:{{ cert_domain }},IP:127.0.0.1{% for host in groups['all'] %},IP:{{ hostvars[host]['internal_ip'] }}{% endfor %}"
+      register: cert_gen
+      changed_when: cert_gen.rc == 0
+
+    - name: "📊 Display certificate information"
+      ansible.builtin.debug:
+        msg: |
+          ✅ SSL Certificate generated successfully
+          Subject: /CN={{ cert_domain }}/O=Keycloak HA/C=ES
+          Validity: {{ cert_days_valid }} days
+          SAN includes:
+            - DNS:localhost
+            - DNS:{{ cert_domain }}
+            - IP:127.0.0.1
+          {% for host in groups['all'] %}
+            - IP:{{ hostvars[host]['internal_ip'] }} ({{ host }})
+          {% endfor %}
+
+    - name: "🔐 Verify certificate was created"
+      ansible.builtin.stat:
+        path: "{{ temp_cert_dir }}/tls.crt"
+      register: cert_check
+      failed_when: not cert_check.stat.exists
+
+    - name: "🔐 Set correct permissions on certificate files"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: '0600'
+      loop:
+        - "{{ temp_cert_dir }}/tls.crt"
+        - "{{ temp_cert_dir }}/tls.key"
+
+# ========================================
+# Task Group 2: Distribute Certificates
+# ========================================
+- name: Phase 3 - Distribute Certificates to All Hosts
+  hosts: all
+  gather_facts: no
+  become: no
+
+  vars:
+    temp_cert_dir: "/tmp/keycloak_ha_certs_{{ hostvars['localhost']['ansible_date_time']['epoch'] }}"
+
+  tasks:
+    - name: "📤 Copy SSL certificate to host"
+      ansible.builtin.copy:
+        src: "{{ temp_cert_dir }}/tls.crt"
+        dest: "{{ deployment_dir }}/certs/tls.crt"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📤 Copy SSL private key to host"
+      ansible.builtin.copy:
+        src: "{{ temp_cert_dir }}/tls.key"
+        dest: "{{ deployment_dir }}/certs/tls.key"
+        mode: '0600'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "✅ Verify certificates on host"
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: cert_files
+      failed_when: not cert_files.stat.exists
+      loop:
+        - "{{ deployment_dir }}/certs/tls.crt"
+        - "{{ deployment_dir }}/certs/tls.key"
+
+    - name: "📊 Display certificate distribution status"
+      ansible.builtin.debug:
+        msg: "✅ Certificates distributed to {{ inventory_hostname }} ({{ internal_ip }})"
+
+# ========================================
+# Cleanup and Summary
+# ========================================
+- name: Phase 3 - Cleanup and Summary
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  vars:
+    temp_cert_dir: "/tmp/keycloak_ha_certs_{{ ansible_date_time.epoch }}"
+
+  tasks:
+    - name: "🧹 Remove temporary certificate directory"
+      ansible.builtin.file:
+        path: "{{ temp_cert_dir }}"
+        state: absent
+
+    - name: "📋 Display certificate generation summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║       KEYCLOAK HA - CERTIFICATE GENERATION COMPLETE           ║
+          ║                    Phase 3 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ SSL certificates generated with internal IPs in SAN
+          ✅ Certificates distributed to all hosts:
+          {% for host in groups['all'] %}
+             - {{ host }}: {{ hostvars[host]['deployment_dir'] }}/certs/
+          {% endfor %}
+          
+          🔐 Certificate details:
+             - Private key: tls.key
+             - Certificate: tls.crt
+             - Validity: {{ cert_days_valid }} days
+             - Includes IPs: 127.0.0.1, {% for host in groups['all'] %}{{ hostvars[host]['internal_ip'] }}{% if not loop.last %}, {% endif %}{% endfor %}
+          
+          ✅ System ready for Phase 4: etcd Deployment
+          
+          Next steps:
+             ansible-playbook playbooks/03-deploy-etcd.yml
+          
+          ═══════════════════════════════════════════════════════════════════

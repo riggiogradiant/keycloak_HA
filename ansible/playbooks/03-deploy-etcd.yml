@@ -1,0 +1,148 @@
+---
+# =============================================================================
+# Playbook: 03-deploy-etcd.yml
+# Purpose: Deploy etcd cluster on both hosts
+# Phase: 4 - etcd Deployment
+#
+# This playbook:
+# 1. Renders docker-compose.yml for each host
+# 2. Starts etcd service on both hosts simultaneously
+# 3. Waits 10 seconds for cluster formation
+# 4. Verifies etcd cluster is healthy
+# =============================================================================
+
+- name: Phase 4 - Deploy etcd Cluster
+  hosts: all
+  gather_facts: yes
+  become: no
+
+  tasks:
+    # ========================================
+    # Task Group 1: Generate docker-compose
+    # ========================================
+    - name: "📝 Generate docker-compose.yml from template"
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/docker-compose.yml.j2"
+        dest: "{{ deployment_dir }}/docker-compose.yml"
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: "📊 Display docker-compose generation status"
+      ansible.builtin.debug:
+        msg: |
+          ✅ docker-compose.yml generated for {{ inventory_hostname }}
+          Location: {{ deployment_dir }}/docker-compose.yml
+          etcd configuration:
+            - Name: {{ etcd_name }}
+            - Listen: 0.0.0.0:{{ etcd_client_port }}, 0.0.0.0:{{ etcd_peer_port }}
+            - Advertise: {{ internal_ip }}:{{ etcd_client_port }}, {{ internal_ip }}:{{ etcd_peer_port }}
+
+    # ========================================
+    # Task Group 2: Deploy etcd Service
+    # ========================================
+    - name: "🚀 Start etcd service"
+      community.docker.docker_compose_v2:
+        project_src: "{{ deployment_dir }}"
+        services:
+          - etcd
+        state: present
+      register: etcd_deploy
+
+    - name: "📊 Display etcd deployment status"
+      ansible.builtin.debug:
+        msg: "✅ etcd service started on {{ inventory_hostname }}"
+
+# ========================================
+# Task Group 3: Wait for Cluster Formation
+# ========================================
+- name: Phase 4 - Wait for etcd Cluster Formation
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "⏳ Wait 10 seconds for etcd cluster to form"
+      ansible.builtin.pause:
+        seconds: 10
+        prompt: "Waiting for etcd cluster formation..."
+
+# ========================================
+# Task Group 4: Verify Cluster
+# ========================================
+- name: Phase 4 - Verify etcd Cluster
+  hosts: "{{ groups['etcd_cluster'][0] }}"  # Check from first node
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "🔍 Check etcd cluster member list"
+      ansible.builtin.command:
+        cmd: docker exec {{ etcd_name }} etcdctl member list
+      register: etcd_members
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display etcd cluster members"
+      ansible.builtin.debug:
+        msg: |
+          etcd Cluster Members:
+          {{ etcd_members.stdout }}
+
+    - name: "✅ Verify all members are started"
+      ansible.builtin.assert:
+        that:
+          - etcd_members.rc == 0
+          - "'started' in etcd_members.stdout"
+        fail_msg: "etcd cluster formation failed - not all members are started"
+        success_msg: "✅ etcd cluster formed successfully with all members started"
+
+    - name: "🔍 Check etcd cluster health"
+      ansible.builtin.command:
+        cmd: docker exec {{ etcd_name }} etcdctl endpoint health
+      register: etcd_health
+      changed_when: false
+      failed_when: false
+
+    - name: "📊 Display etcd health status"
+      ansible.builtin.debug:
+        msg: |
+          etcd Health Status:
+          {{ etcd_health.stdout }}
+
+# ========================================
+# Final Summary
+# ========================================
+- name: Phase 4 - Summary Report
+  hosts: localhost
+  gather_facts: no
+  become: no
+
+  tasks:
+    - name: "📋 Display etcd deployment summary"
+      ansible.builtin.debug:
+        msg: |
+          
+          ╔════════════════════════════════════════════════════════════════╗
+          ║           KEYCLOAK HA - ETCD CLUSTER DEPLOYED                 ║
+          ║                    Phase 4 Complete                            ║
+          ╚════════════════════════════════════════════════════════════════╝
+          
+          ✅ etcd deployed on all hosts:
+          {% for host in groups['etcd_cluster'] %}
+             - {{ host }} ({{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['etcd_client_port'] }})
+          {% endfor %}
+          
+          ✅ Cluster formation verified
+          ✅ All members in "started" state
+          
+          📍 etcd endpoints:
+             Client: {% for host in groups['etcd_cluster'] %}{{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['etcd_client_port'] }}{% if not loop.last %}, {% endif %}{% endfor %}
+             Peer: {% for host in groups['etcd_cluster'] %}{{ hostvars[host]['internal_ip'] }}:{{ hostvars[host]['etcd_peer_port'] }}{% if not loop.last %}, {% endif %}{% endfor %}
+          
+          ✅ System ready for Phase 5: PostgreSQL + Patroni Deployment
+          
+          Next steps:
+             ansible-playbook playbooks/04-deploy-patroni.yml
+          
+          ═══════════════════════════════════════════════════════════════════
